@@ -1,18 +1,26 @@
+import asyncio
+import json
 import os
 import time
-import json
-import threading
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs, unquote
+from aiohttp import web, WSMsgType
 
 
 # =========================================================
 # SETTINGS
 # =========================================================
 
-TOKEN = os.environ.get("REMOTE_TOKEN", "Salaxyf_RemotePC_2026_8xK9pQ")
-PORT = int(os.environ.get("PORT", "8000"))
+TOKEN = os.environ.get(
+    "REMOTE_TOKEN",
+    "CHANGE_ME"
+)
+
+PORT = int(
+    os.environ.get(
+        "PORT",
+        "8000"
+    )
+)
 
 OFFLINE_AFTER = 10
 
@@ -22,15 +30,43 @@ OFFLINE_AFTER = 10
 # =========================================================
 
 clients = {}
-lock = threading.Lock()
+
+
+# Structure:
+#
+# clients = {
+#     "PC-001": {
+#         "ws": websocket,
+#         "last_seen": 1234567890.0,
+#         "frame": b"..."
+#     }
+# }
+
+
+# =========================================================
+# AUTH
+# =========================================================
+
+def authorized(request):
+
+    received_token = request.query.get(
+        "token",
+        ""
+    )
+
+    return (
+        TOKEN != "CHANGE_ME"
+        and received_token == TOKEN
+    )
 
 
 # =========================================================
 # DASHBOARD
 # =========================================================
 
-DASHBOARD_HTML = r"""
+HTML = r"""
 <!DOCTYPE html>
+
 <html lang="ru">
 
 <head>
@@ -88,7 +124,7 @@ main {
     grid-template-columns:
         repeat(
             auto-fit,
-            minmax(300px, 1fr)
+            minmax(320px, 1fr)
         );
 
     gap: 18px;
@@ -101,7 +137,6 @@ main {
     border-radius: 16px;
 
     overflow: hidden;
-    cursor: pointer;
 
     transition: 0.2s;
 }
@@ -120,6 +155,8 @@ main {
     display: flex;
     align-items: center;
     justify-content: center;
+
+    overflow: hidden;
 }
 
 .preview img {
@@ -127,6 +164,7 @@ main {
     height: 100%;
 
     object-fit: contain;
+
     display: block;
 }
 
@@ -142,6 +180,7 @@ main {
 .name {
     font-size: 18px;
     font-weight: bold;
+
     margin-bottom: 7px;
 }
 
@@ -155,7 +194,9 @@ main {
 
 .empty {
     text-align: center;
+
     padding: 100px 20px;
+
     color: #777;
 }
 
@@ -171,15 +212,19 @@ main {
     🖥 Office Monitor
 </div>
 
-<div id="counter" class="counter">
+<div id="counter"
+     class="counter">
     Загрузка...
 </div>
 
 </header>
 
+
 <main>
 
-<div id="grid" class="grid"></div>
+<div id="grid"
+     class="grid">
+</div>
 
 <div id="empty"
      class="empty"
@@ -198,36 +243,125 @@ const token =
     ).get("token");
 
 
+const images = {};
+
+
+function createCard(pcId) {
+
+    const card =
+        document.createElement("div");
+
+    card.className = "card";
+
+
+    const preview =
+        document.createElement("div");
+
+    preview.className = "preview";
+
+
+    const image =
+        document.createElement("img");
+
+    image.alt = pcId;
+
+
+    preview.appendChild(image);
+
+
+    const info =
+        document.createElement("div");
+
+    info.className = "info";
+
+
+    const name =
+        document.createElement("div");
+
+    name.className = "name";
+
+    name.textContent = pcId;
+
+
+    const status =
+        document.createElement("div");
+
+    status.className = "online";
+
+    status.textContent = "● CONNECTING";
+
+
+    info.appendChild(name);
+
+    info.appendChild(status);
+
+
+    card.appendChild(preview);
+
+    card.appendChild(info);
+
+
+    document
+        .getElementById("grid")
+        .appendChild(card);
+
+
+    images[pcId] = {
+        image: image,
+        status: status
+    };
+
+}
+
+
+function removeCard(pcId) {
+
+    delete images[pcId];
+
+}
+
+
 async function loadClients() {
 
     try {
 
-        const response = await fetch(
-            "/api/clients?token=" +
-            encodeURIComponent(token)
-        );
+        const response =
+            await fetch(
+                "/api/clients?token=" +
+                encodeURIComponent(token)
+            );
+
 
         if (!response.ok) {
+
             throw new Error(
-                "HTTP " + response.status
+                "HTTP " +
+                response.status
             );
+
         }
+
 
         const data =
             await response.json();
 
+
         renderClients(data);
+
 
     } catch (error) {
 
-        console.error(error);
+        console.error(
+            "Client list error:",
+            error
+        );
 
     }
 
 }
 
 
-function renderClients(clients) {
+function renderClients(data) {
 
     const grid =
         document.getElementById("grid");
@@ -243,18 +377,7 @@ function renderClients(clients) {
 
 
     const ids =
-        Object.keys(clients);
-
-
-    if (ids.length === 0) {
-
-        empty.style.display = "block";
-
-    } else {
-
-        empty.style.display = "none";
-
-    }
+        Object.keys(data);
 
 
     let online = 0;
@@ -262,12 +385,8 @@ function renderClients(clients) {
 
     for (const pcId of ids) {
 
-        const pc = clients[pcId];
-
-
-        if (pc.online) {
-            online++;
-        }
+        const pc =
+            data[pcId];
 
 
         const card =
@@ -284,18 +403,24 @@ function renderClients(clients) {
 
         if (pc.online) {
 
+            online++;
+
+
             const img =
                 document.createElement("img");
 
+
             img.src =
-                "/screen/" +
+                "/frame/" +
                 encodeURIComponent(pcId) +
                 "?token=" +
                 encodeURIComponent(token) +
                 "&t=" +
                 Date.now();
 
+
             preview.appendChild(img);
+
 
         } else {
 
@@ -304,7 +429,9 @@ function renderClients(clients) {
 
             text.className = "offline";
 
-            text.textContent = "OFFLINE";
+            text.textContent =
+                "OFFLINE";
+
 
             preview.appendChild(text);
 
@@ -322,7 +449,8 @@ function renderClients(clients) {
 
         name.className = "name";
 
-        name.textContent = pcId;
+        name.textContent =
+            pcId;
 
 
         const status =
@@ -331,36 +459,47 @@ function renderClients(clients) {
 
         if (pc.online) {
 
-            status.className = "online";
-            status.textContent = "● ONLINE";
+            status.className =
+                "online";
+
+            status.textContent =
+                "● ONLINE";
 
         } else {
 
-            status.className = "offline-status";
-            status.textContent = "● OFFLINE";
+            status.className =
+                "offline-status";
+
+            status.textContent =
+                "● OFFLINE";
 
         }
 
 
         info.appendChild(name);
+
         info.appendChild(status);
 
+
         card.appendChild(preview);
+
         card.appendChild(info);
 
 
-        card.onclick = function () {
-
-            window.location.href =
-                "/pc/" +
-                encodeURIComponent(pcId) +
-                "?token=" +
-                encodeURIComponent(token);
-
-        };
-
-
         grid.appendChild(card);
+
+    }
+
+
+    if (ids.length === 0) {
+
+        empty.style.display =
+            "block";
+
+    } else {
+
+        empty.style.display =
+            "none";
 
     }
 
@@ -374,7 +513,33 @@ function renderClients(clients) {
 }
 
 
+async function refreshFrames() {
+
+    const ids =
+        Object.keys(images);
+
+
+    for (const pcId of ids) {
+
+        const image =
+            images[pcId].image;
+
+
+        image.src =
+            "/frame/" +
+            encodeURIComponent(pcId) +
+            "?token=" +
+            encodeURIComponent(token) +
+            "&t=" +
+            Date.now();
+
+    }
+
+}
+
+
 loadClients();
+
 
 setInterval(
     loadClients,
@@ -384,532 +549,310 @@ setInterval(
 </script>
 
 </body>
+
 </html>
 """
 
 
 # =========================================================
-# PC PAGE
+# INDEX
 # =========================================================
 
-PC_HTML = r"""
-<!DOCTYPE html>
-<html lang="ru">
+async def index(request):
 
-<head>
+    if not authorized(request):
 
-<meta charset="UTF-8">
+        return web.Response(
+            status=403,
+            text="Forbidden"
+        )
 
-<meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
-
-<title>PC Monitor</title>
-
-<style>
-
-body {
-    margin: 0;
-    background: #08080d;
-    color: white;
-    font-family: Arial, sans-serif;
-}
-
-header {
-    height: 70px;
-    padding: 0 25px;
-
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-
-    background: #111118;
-    border-bottom: 1px solid #292936;
-}
-
-main {
-    max-width: 1500px;
-    margin: auto;
-    padding: 25px;
-}
-
-button {
-    margin-bottom: 20px;
-
-    padding: 12px 18px;
-
-    border: 0;
-    border-radius: 10px;
-
-    background: #292938;
-    color: white;
-
-    cursor: pointer;
-}
-
-button:hover {
-    background: #3a3a4c;
-}
-
-.screen {
-    background: black;
-    border-radius: 16px;
-    overflow: hidden;
-}
-
-.screen img {
-    width: 100%;
-    display: block;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<header>
-
-<div>
-    🖥 <span id="pcName"></span>
-</div>
-
-<div>
-    ● MONITOR
-</div>
-
-</header>
-
-
-<main>
-
-<button onclick="history.back()">
-    ← Назад
-</button>
-
-<div class="screen">
-
-<img id="screen"
-     alt="Screen">
-
-</div>
-
-</main>
-
-
-<script>
-
-const params =
-    new URLSearchParams(
-        window.location.search
-    );
-
-const token =
-    params.get("token");
-
-
-const parts =
-    window.location.pathname.split("/");
-
-
-const pcId =
-    decodeURIComponent(parts[2]);
-
-
-document.getElementById(
-    "pcName"
-).textContent = pcId;
-
-
-function updateScreen() {
-
-    const image =
-        document.getElementById("screen");
-
-    image.src =
-        "/screen/" +
-        encodeURIComponent(pcId) +
-        "?token=" +
-        encodeURIComponent(token) +
-        "&t=" +
-        Date.now();
-
-}
-
-
-updateScreen();
-
-setInterval(
-    updateScreen,
-    1000 / 30
-);
-
-</script>
-
-</body>
-</html>
-"""
+    return web.Response(
+        text=HTML,
+        content_type="text/html"
+    )
 
 
 # =========================================================
-# HTTP HANDLER
+# CLIENT LIST
 # =========================================================
 
-class Handler(BaseHTTPRequestHandler):
+async def api_clients(request):
 
-    def log_message(self, format, *args):
-        return
+    if not authorized(request):
 
-
-    # =====================================================
-    # AUTHORIZATION
-    # =====================================================
-
-    def authorized(self):
-
-        parsed = urlparse(self.path)
-
-        params = parse_qs(parsed.query)
-
-        received_token = params.get(
-            "token",
-            [""]
-        )[0]
-
-        return (
-            TOKEN != "CHANGE_ME"
-            and received_token == TOKEN
+        return web.Response(
+            status=403,
+            text="Forbidden"
         )
 
 
-    # =====================================================
-    # SEND HTML
-    # =====================================================
+    now = time.time()
 
-    def send_html(self, html):
+    result = {}
 
-        data = html.encode("utf-8")
 
-        self.send_response(200)
+    for pc_id, pc in clients.items():
 
-        self.send_header(
-            "Content-Type",
-            "text/html; charset=utf-8"
+        online = (
+            now - pc["last_seen"]
+            < OFFLINE_AFTER
         )
 
-        self.send_header(
-            "Content-Length",
-            str(len(data))
+
+        result[pc_id] = {
+            "online": online
+        }
+
+
+    return web.json_response(
+        result
+    )
+
+
+# =========================================================
+# FRAME
+# =========================================================
+
+async def get_frame(request):
+
+    if not authorized(request):
+
+        return web.Response(
+            status=403,
+            text="Forbidden"
         )
 
-        self.end_headers()
 
-        self.wfile.write(data)
-
-
-    # =====================================================
-    # GET
-    # =====================================================
-
-    def do_GET(self):
-
-        parsed = urlparse(self.path)
+    pc_id = request.match_info[
+        "pc_id"
+    ]
 
 
-        if not self.authorized():
-
-            self.send_error(
-                403,
-                "Forbidden"
-            )
-
-            return
+    pc = clients.get(pc_id)
 
 
-        # =================================================
-        # DASHBOARD
-        # =================================================
+    if pc is None:
 
-        if parsed.path == "/":
-
-            self.send_html(
-                DASHBOARD_HTML
-            )
-
-            return
+        return web.Response(
+            status=404,
+            text="PC not found"
+        )
 
 
-        # =================================================
-        # CLIENT LIST
-        # =================================================
-
-        if parsed.path == "/api/clients":
-
-            now = time.time()
-
-            result = {}
+    frame = pc.get(
+        "frame"
+    )
 
 
-            with lock:
+    if not frame:
 
-                for pc_id, pc in clients.items():
-
-                    online = (
-                        now - pc["last_seen"]
-                        < OFFLINE_AFTER
-                    )
-
-                    result[pc_id] = {
-                        "online": online
-                    }
+        return web.Response(
+            status=404,
+            text="No frame"
+        )
 
 
-            data = json.dumps(
-                result
-            ).encode("utf-8")
-
-
-            self.send_response(200)
-
-            self.send_header(
-                "Content-Type",
-                "application/json"
-            )
-
-            self.send_header(
-                "Cache-Control",
-                "no-cache"
-            )
-
-            self.send_header(
-                "Content-Length",
-                str(len(data))
-            )
-
-            self.end_headers()
-
-            self.wfile.write(data)
-
-            return
-
-
-        # =================================================
-        # PC PAGE
-        # =================================================
-
-        if parsed.path.startswith("/pc/"):
-
-            self.send_html(
-                PC_HTML
-            )
-
-            return
-
-
-        # =================================================
-        # SCREEN
-        # =================================================
-
-        if parsed.path.startswith("/screen/"):
-
-            pc_id = unquote(
-                parsed.path[len("/screen/"):]
-            )
-
-
-            with lock:
-
-                pc = clients.get(pc_id)
-
-                if pc is None:
-                    frame = None
-                else:
-                    frame = pc["frame"]
-
-
-            if frame is None:
-
-                self.send_error(
-                    404,
-                    "No frame"
-                )
-
-                return
-
-
-            self.send_response(200)
-
-            self.send_header(
-                "Content-Type",
-                "image/jpeg"
-            )
-
-            self.send_header(
-                "Cache-Control",
+    return web.Response(
+        body=frame,
+        content_type="image/jpeg",
+        headers={
+            "Cache-Control":
                 "no-cache, no-store"
-            )
-
-            self.send_header(
-                "Content-Length",
-                str(len(frame))
-            )
-
-            self.end_headers()
-
-            self.wfile.write(frame)
-
-            return
+        }
+    )
 
 
-        self.send_error(404)
+# =========================================================
+# WEBSOCKET AGENT
+# =========================================================
+
+async def agent_websocket(request):
+
+    if not authorized(request):
+
+        return web.Response(
+            status=403,
+            text="Forbidden"
+        )
 
 
-    # =====================================================
-    # POST
-    # =====================================================
-
-    def do_POST(self):
-
-        parsed = urlparse(self.path)
+    pc_id = request.query.get(
+        "pc_id",
+        ""
+    )
 
 
-        # =================================================
-        # FRAME
-        # =================================================
+    if not pc_id:
 
-        if parsed.path == "/frame":
-
-            if not self.authorized():
-
-                self.send_error(
-                    403,
-                    "Forbidden"
-                )
-
-                return
+        return web.Response(
+            status=400,
+            text="Missing pc_id"
+        )
 
 
-            params = parse_qs(
-                parsed.query
-            )
+    ws = web.WebSocketResponse(
+        max_msg_size=10 * 1024 * 1024
+    )
 
 
-            pc_id = params.get(
-                "pc_id",
-                [""]
-            )[0]
+    await ws.prepare(request)
 
 
-            if not pc_id:
-
-                self.send_error(
-                    400,
-                    "Missing pc_id"
-                )
-
-                return
+    clients[pc_id] = {
+        "ws": ws,
+        "last_seen": time.time(),
+        "frame": None
+    }
 
 
-            try:
+    print(
+        f"[CONNECT] {pc_id}"
+    )
 
-                length = int(
-                    self.headers.get(
-                        "Content-Length",
-                        "0"
+
+    try:
+
+        async for message in ws:
+
+            if message.type == WSMsgType.BINARY:
+
+                clients[pc_id][
+                    "frame"
+                ] = message.data
+
+                clients[pc_id][
+                    "last_seen"
+                ] = time.time()
+
+
+            elif message.type == WSMsgType.TEXT:
+
+                try:
+
+                    data = json.loads(
+                        message.data
                     )
-                )
 
-            except ValueError:
+                    if data.get("type") == "ping":
 
-                self.send_error(
-                    400,
-                    "Invalid Content-Length"
-                )
+                        clients[pc_id][
+                            "last_seen"
+                        ] = time.time()
 
-                return
+                except Exception:
 
-
-            if length <= 0:
-
-                self.send_error(
-                    400,
-                    "Empty frame"
-                )
-
-                return
+                    pass
 
 
-            frame = self.rfile.read(
-                length
-            )
+            elif message.type == WSMsgType.ERROR:
+
+                break
 
 
-            if not frame:
+    except Exception as error:
 
-                self.send_error(
-                    400,
-                    "Empty frame"
-                )
-
-                return
+        print(
+            f"[WS ERROR] {pc_id}:",
+            error
+        )
 
 
-            with lock:
+    finally:
 
-                clients[pc_id] = {
-                    "frame": frame,
-                    "last_seen": time.time()
-                }
-
-
-            self.send_response(200)
-
-            self.send_header(
-                "Content-Type",
-                "text/plain"
-            )
-
-            self.send_header(
-                "Content-Length",
-                "2"
-            )
-
-            self.end_headers()
-
-            self.wfile.write(b"OK")
-
-            return
+        current = clients.get(
+            pc_id
+        )
 
 
-        self.send_error(404)
+        if current is not None:
+
+            if current["ws"] is ws:
+
+                del clients[pc_id]
+
+
+        print(
+            f"[DISCONNECT] {pc_id}"
+        )
+
+
+    return ws
 
 
 # =========================================================
-# START SERVER
+# HEALTH CHECK
 # =========================================================
 
-print("================================")
-print("       OFFICE MONITOR")
-print("================================")
-print("Port:", PORT)
+async def health(request):
+
+    return web.Response(
+        text="OK"
+    )
 
 
-server = ThreadingHTTPServer(
-    ("0.0.0.0", PORT),
-    Handler
+# =========================================================
+# APPLICATION
+# =========================================================
+
+app = web.Application()
+
+
+app.router.add_get(
+    "/",
+    index
 )
 
 
-print("Server started")
+app.router.add_get(
+    "/health",
+    health
+)
 
 
-try:
+app.router.add_get(
+    "/api/clients",
+    api_clients
+)
 
-    server.serve_forever()
 
-except KeyboardInterrupt:
+app.router.add_get(
+    "/frame/{pc_id}",
+    get_frame
+)
 
-    print("Stopping server...")
 
-finally:
+app.router.add_get(
+    "/ws/agent",
+    agent_websocket
+)
 
-    server.server_close()
+
+# =========================================================
+# START
+# =========================================================
+
+if __name__ == "__main__":
+
+    print(
+        "================================"
+    )
+
+    print(
+        "       OFFICE MONITOR"
+    )
+
+    print(
+        "================================"
+    )
+
+    print(
+        "Port:",
+        PORT
+    )
+
+    web.run_app(
+        app,
+        host="0.0.0.0",
+        port=PORT
+    )
