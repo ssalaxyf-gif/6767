@@ -1,7 +1,7 @@
-import asyncio
 import json
 import os
 import time
+import uuid
 
 from aiohttp import web, WSMsgType
 
@@ -22,7 +22,7 @@ PORT = int(
     )
 )
 
-OFFLINE_AFTER = 10
+OFFLINE_AFTER = 15
 
 
 # =========================================================
@@ -31,33 +31,8 @@ OFFLINE_AFTER = 10
 
 clients = {}
 
-
-# Structure:
-#
-# clients = {
-#     "PC-001": {
-#         "ws": websocket,
-#         "last_seen": 1234567890.0,
-#         "frame": b"..."
-#     }
-# }
-
-
-# =========================================================
-# AUTH
-# =========================================================
-
-def authorized(request):
-
-    received_token = request.query.get(
-        "token",
-        ""
-    )
-
-    return (
-        TOKEN != "CHANGE_ME"
-        and received_token == TOKEN
-    )
+agents = {}
+viewers = {}
 
 
 # =========================================================
@@ -93,6 +68,7 @@ body {
 
 header {
     height: 70px;
+
     padding: 0 25px;
 
     display: flex;
@@ -100,7 +76,9 @@ header {
     justify-content: space-between;
 
     background: #111118;
-    border-bottom: 1px solid #292936;
+
+    border-bottom:
+        1px solid #292936;
 }
 
 .logo {
@@ -114,7 +92,9 @@ header {
 
 main {
     max-width: 1600px;
+
     margin: auto;
+
     padding: 25px;
 }
 
@@ -133,33 +113,40 @@ main {
 .card {
     background: #111118;
 
-    border: 1px solid #292936;
+    border:
+        1px solid #292936;
+
     border-radius: 16px;
 
     overflow: hidden;
+
+    cursor: pointer;
 
     transition: 0.2s;
 }
 
 .card:hover {
     transform: translateY(-3px);
+
     border-color: #6666ff;
 }
 
 .preview {
     width: 100%;
+
     aspect-ratio: 16 / 9;
 
     background: #030305;
 
     display: flex;
+
     align-items: center;
     justify-content: center;
 
     overflow: hidden;
 }
 
-.preview img {
+.preview video {
     width: 100%;
     height: 100%;
 
@@ -170,6 +157,7 @@ main {
 
 .offline {
     color: #777;
+
     font-size: 18px;
 }
 
@@ -179,6 +167,7 @@ main {
 
 .name {
     font-size: 18px;
+
     font-weight: bold;
 
     margin-bottom: 7px;
@@ -243,82 +232,7 @@ const token =
     ).get("token");
 
 
-const images = {};
-
-
-function createCard(pcId) {
-
-    const card =
-        document.createElement("div");
-
-    card.className = "card";
-
-
-    const preview =
-        document.createElement("div");
-
-    preview.className = "preview";
-
-
-    const image =
-        document.createElement("img");
-
-    image.alt = pcId;
-
-
-    preview.appendChild(image);
-
-
-    const info =
-        document.createElement("div");
-
-    info.className = "info";
-
-
-    const name =
-        document.createElement("div");
-
-    name.className = "name";
-
-    name.textContent = pcId;
-
-
-    const status =
-        document.createElement("div");
-
-    status.className = "online";
-
-    status.textContent = "● CONNECTING";
-
-
-    info.appendChild(name);
-
-    info.appendChild(status);
-
-
-    card.appendChild(preview);
-
-    card.appendChild(info);
-
-
-    document
-        .getElementById("grid")
-        .appendChild(card);
-
-
-    images[pcId] = {
-        image: image,
-        status: status
-    };
-
-}
-
-
-function removeCard(pcId) {
-
-    delete images[pcId];
-
-}
+const activeConnections = {};
 
 
 async function loadClients() {
@@ -352,7 +266,7 @@ async function loadClients() {
     } catch (error) {
 
         console.error(
-            "Client list error:",
+            "CLIENT LIST ERROR:",
             error
         );
 
@@ -389,6 +303,13 @@ function renderClients(data) {
             data[pcId];
 
 
+        if (pc.online) {
+
+            online++;
+
+        }
+
+
         const card =
             document.createElement("div");
 
@@ -398,42 +319,48 @@ function renderClients(data) {
         const preview =
             document.createElement("div");
 
-        preview.className = "preview";
+        preview.className =
+            "preview";
 
 
         if (pc.online) {
 
-            online++;
+            const video =
+                document.createElement("video");
 
 
-            const img =
-                document.createElement("img");
+            video.autoplay = true;
+
+            video.playsInline = true;
+
+            video.muted = true;
 
 
-            img.src =
-                "/frame/" +
-                encodeURIComponent(pcId) +
-                "?token=" +
-                encodeURIComponent(token) +
-                "&t=" +
-                Date.now();
+            preview.appendChild(
+                video
+            );
 
 
-            preview.appendChild(img);
-
+            startWebRTC(
+                pcId,
+                video
+            );
 
         } else {
 
             const text =
                 document.createElement("div");
 
-            text.className = "offline";
+            text.className =
+                "offline";
 
             text.textContent =
                 "OFFLINE";
 
 
-            preview.appendChild(text);
+            preview.appendChild(
+                text
+            );
 
         }
 
@@ -441,13 +368,15 @@ function renderClients(data) {
         const info =
             document.createElement("div");
 
-        info.className = "info";
+        info.className =
+            "info";
 
 
         const name =
             document.createElement("div");
 
-        name.className = "name";
+        name.className =
+            "name";
 
         name.textContent =
             pcId;
@@ -513,27 +442,199 @@ function renderClients(data) {
 }
 
 
-async function refreshFrames() {
+async function startWebRTC(
+    pcId,
+    video
+) {
 
-    const ids =
-        Object.keys(images);
+    if (activeConnections[pcId]) {
 
+        try {
 
-    for (const pcId of ids) {
+            activeConnections[
+                pcId
+            ].close();
 
-        const image =
-            images[pcId].image;
-
-
-        image.src =
-            "/frame/" +
-            encodeURIComponent(pcId) +
-            "?token=" +
-            encodeURIComponent(token) +
-            "&t=" +
-            Date.now();
+        } catch {}
 
     }
+
+
+    const viewerId =
+        crypto.randomUUID();
+
+
+    const protocol =
+        location.protocol === "https:"
+            ? "wss:"
+            : "ws:";
+
+
+    const ws =
+        new WebSocket(
+            protocol +
+            "//" +
+            location.host +
+            "/ws/signal?role=viewer" +
+            "&pc_id=" +
+            encodeURIComponent(pcId) +
+            "&viewer_id=" +
+            viewerId +
+            "&token=" +
+            encodeURIComponent(token)
+        );
+
+
+    const pc =
+        new RTCPeerConnection({
+            iceServers: [
+                {
+                    urls:
+                        "stun:stun.l.google.com:19302"
+                }
+            ]
+        });
+
+
+    activeConnections[
+        pcId
+    ] = pc;
+
+
+    pc.addTransceiver(
+        "video",
+        {
+            direction: "recvonly"
+        }
+    );
+
+
+    pc.ontrack = function(event) {
+
+        if (event.streams.length > 0) {
+
+            video.srcObject =
+                event.streams[0];
+
+        }
+
+    };
+
+
+    ws.onmessage =
+        async function(event) {
+
+            const message =
+                JSON.parse(
+                    event.data
+                );
+
+
+            if (
+                message.type ===
+                "answer"
+            ) {
+
+                await pc.setRemoteDescription(
+                    {
+                        type: "answer",
+                        sdp: message.sdp
+                    }
+                );
+
+            }
+
+        };
+
+
+    ws.onopen =
+        async function() {
+
+            const offer =
+                await pc.createOffer();
+
+
+            await pc.setLocalDescription(
+                offer
+            );
+
+
+            await waitForIceGathering(
+                pc
+            );
+
+
+            ws.send(
+                JSON.stringify({
+                    type: "offer",
+
+                    sdp:
+                        pc.localDescription.sdp
+                })
+            );
+
+        };
+
+
+    ws.onclose =
+        function() {
+
+            try {
+
+                pc.close();
+
+            } catch {}
+
+        };
+
+}
+
+
+function waitForIceGathering(
+    pc
+) {
+
+    return new Promise(
+        resolve => {
+
+            if (
+                pc.iceGatheringState ===
+                "complete"
+            ) {
+
+                resolve();
+
+                return;
+
+            }
+
+
+            function check() {
+
+                if (
+                    pc.iceGatheringState ===
+                    "complete"
+                ) {
+
+                    pc.removeEventListener(
+                        "icegatheringstatechange",
+                        check
+                    );
+
+                    resolve();
+
+                }
+
+            }
+
+
+            pc.addEventListener(
+                "icegatheringstatechange",
+                check
+            );
+
+        }
+    );
 
 }
 
@@ -543,7 +644,7 @@ loadClients();
 
 setInterval(
     loadClients,
-    3000
+    5000
 );
 
 </script>
@@ -552,6 +653,25 @@ setInterval(
 
 </html>
 """
+
+
+# =========================================================
+# AUTH
+# =========================================================
+
+def authorized(request):
+
+    received =
+        request.query.get(
+            "token",
+            ""
+        )
+
+    return (
+        TOKEN != "CHANGE_ME"
+        and
+        received == TOKEN
+    )
 
 
 # =========================================================
@@ -566,6 +686,7 @@ async def index(request):
             status=403,
             text="Forbidden"
         )
+
 
     return web.Response(
         text=HTML,
@@ -592,16 +713,12 @@ async def api_clients(request):
     result = {}
 
 
-    for pc_id, pc in clients.items():
-
-        online = (
-            now - pc["last_seen"]
-            < OFFLINE_AFTER
-        )
-
+    for pc_id, data in clients.items():
 
         result[pc_id] = {
-            "online": online
+            "online":
+                now - data["last_seen"]
+                < OFFLINE_AFTER
         }
 
 
@@ -611,10 +728,10 @@ async def api_clients(request):
 
 
 # =========================================================
-# FRAME
+# SIGNALING WEBSOCKET
 # =========================================================
 
-async def get_frame(request):
+async def signal(request):
 
     if not authorized(request):
 
@@ -624,63 +741,36 @@ async def get_frame(request):
         )
 
 
-    pc_id = request.match_info[
-        "pc_id"
-    ]
-
-
-    pc = clients.get(pc_id)
-
-
-    if pc is None:
-
-        return web.Response(
-            status=404,
-            text="PC not found"
+    role =
+        request.query.get(
+            "role",
+            ""
         )
 
 
-    frame = pc.get(
-        "frame"
-    )
-
-
-    if not frame:
-
-        return web.Response(
-            status=404,
-            text="No frame"
+    pc_id =
+        request.query.get(
+            "pc_id",
+            ""
         )
 
 
-    return web.Response(
-        body=frame,
-        content_type="image/jpeg",
-        headers={
-            "Cache-Control":
-                "no-cache, no-store"
-        }
-    )
-
-
-# =========================================================
-# WEBSOCKET AGENT
-# =========================================================
-
-async def agent_websocket(request):
-
-    if not authorized(request):
-
-        return web.Response(
-            status=403,
-            text="Forbidden"
+    viewer_id =
+        request.query.get(
+            "viewer_id",
+            ""
         )
 
 
-    pc_id = request.query.get(
-        "pc_id",
-        ""
-    )
+    if role not in (
+        "agent",
+        "viewer"
+    ):
+
+        return web.Response(
+            status=400,
+            text="Invalid role"
+        )
 
 
     if not pc_id:
@@ -691,97 +781,182 @@ async def agent_websocket(request):
         )
 
 
-    ws = web.WebSocketResponse(
-        max_msg_size=10 * 1024 * 1024
-    )
+    ws =
+        web.WebSocketResponse(
+            heartbeat=30
+        )
 
 
     await ws.prepare(request)
 
 
-    clients[pc_id] = {
-        "ws": ws,
-        "last_seen": time.time(),
-        "frame": None
-    }
+    if role == "agent":
+
+        agents[pc_id] = ws
 
 
-    print(
-        f"[CONNECT] {pc_id}"
-    )
+        clients[pc_id] = {
+            "last_seen":
+                time.time()
+        }
+
+
+        print(
+            "[AGENT CONNECTED]",
+            pc_id
+        )
+
+
+    else:
+
+        if not viewer_id:
+
+            await ws.close()
+
+            return ws
+
+
+        viewers[
+            (pc_id, viewer_id)
+        ] = ws
+
+
+        print(
+            "[VIEWER CONNECTED]",
+            pc_id,
+            viewer_id
+        )
 
 
     try:
 
         async for message in ws:
 
-            if message.type == WSMsgType.BINARY:
+            if (
+                message.type !=
+                WSMsgType.TEXT
+            ):
 
-                clients[pc_id][
-                    "frame"
-                ] = message.data
+                continue
+
+
+            try:
+
+                data =
+                    json.loads(
+                        message.data
+                    )
+
+            except Exception:
+
+                continue
+
+
+            if role == "agent":
 
                 clients[pc_id][
                     "last_seen"
                 ] = time.time()
 
 
-            elif message.type == WSMsgType.TEXT:
-
-                try:
-
-                    data = json.loads(
-                        message.data
+                target =
+                    data.get(
+                        "viewer_id"
                     )
 
-                    if data.get("type") == "ping":
 
-                        clients[pc_id][
-                            "last_seen"
-                        ] = time.time()
+                if target:
 
-                except Exception:
+                    viewer =
+                        viewers.get(
+                            (
+                                pc_id,
+                                target
+                            )
+                        )
 
-                    pass
+
+                    if viewer:
+
+                        await viewer.send_str(
+                            json.dumps(data)
+                        )
 
 
-            elif message.type == WSMsgType.ERROR:
+            else:
 
-                break
+                agent =
+                    agents.get(
+                        pc_id
+                    )
+
+
+                if agent:
+
+                    data[
+                        "viewer_id"
+                    ] = viewer_id
+
+
+                    await agent.send_str(
+                        json.dumps(data)
+                    )
 
 
     except Exception as error:
 
         print(
-            f"[WS ERROR] {pc_id}:",
+            "[SIGNAL ERROR]",
             error
         )
 
 
     finally:
 
-        current = clients.get(
-            pc_id
-        )
+        if role == "agent":
+
+            if agents.get(
+                pc_id
+            ) is ws:
+
+                del agents[pc_id]
 
 
-        if current is not None:
+            clients.pop(
+                pc_id,
+                None
+            )
 
-            if current["ws"] is ws:
 
-                del clients[pc_id]
+            print(
+                "[AGENT DISCONNECTED]",
+                pc_id
+            )
 
 
-        print(
-            f"[DISCONNECT] {pc_id}"
-        )
+        else:
+
+            viewers.pop(
+                (
+                    pc_id,
+                    viewer_id
+                ),
+                None
+            )
+
+
+            print(
+                "[VIEWER DISCONNECTED]",
+                pc_id,
+                viewer_id
+            )
 
 
     return ws
 
 
 # =========================================================
-# HEALTH CHECK
+# HEALTH
 # =========================================================
 
 async def health(request):
@@ -792,10 +967,11 @@ async def health(request):
 
 
 # =========================================================
-# APPLICATION
+# APP
 # =========================================================
 
-app = web.Application()
+app =
+    web.Application()
 
 
 app.router.add_get(
@@ -817,14 +993,8 @@ app.router.add_get(
 
 
 app.router.add_get(
-    "/frame/{pc_id}",
-    get_frame
-)
-
-
-app.router.add_get(
-    "/ws/agent",
-    agent_websocket
+    "/ws/signal",
+    signal
 )
 
 
