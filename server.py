@@ -7,7 +7,7 @@ from aiohttp import web, WSMsgType
 
 TOKEN = os.environ.get(
     "REMOTE_TOKEN",
-    "CHANGE_ME"
+    "Salaxyf_RemotePC_2026_8xK9pQ"
 )
 
 PORT = int(
