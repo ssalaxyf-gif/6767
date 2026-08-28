@@ -1,13 +1,14 @@
 import json
 import os
 import time
+import uuid
 
 from aiohttp import web, WSMsgType
 
 
 TOKEN = os.environ.get(
     "REMOTE_TOKEN",
-    "Salaxyf_RemotePC_2026_8xK9pQ"
+    "CHANGE_ME"
 )
 
 PORT = int(
@@ -19,23 +20,20 @@ PORT = int(
 
 OFFLINE_AFTER = 15
 
-
 agents = {}
+viewers = {}
 clients = {}
 
 
 HTML = r"""
 <!DOCTYPE html>
 <html lang="ru">
-
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-
 <title>Office Monitor</title>
 
 <style>
-
 * {
     box-sizing: border-box;
 }
@@ -50,11 +48,9 @@ body {
 header {
     height: 70px;
     padding: 0 25px;
-
     display: flex;
     align-items: center;
     justify-content: space-between;
-
     background: #111118;
     border-bottom: 1px solid #292936;
 }
@@ -92,7 +88,6 @@ main {
     width: 100%;
     aspect-ratio: 16 / 9;
     background: #020204;
-
     display: flex;
     align-items: center;
     justify-content: center;
@@ -102,7 +97,6 @@ video {
     width: 100%;
     height: 100%;
     object-fit: contain;
-    display: block;
 }
 
 .info {
@@ -127,29 +121,18 @@ video {
 .waiting {
     color: #777;
 }
-
 </style>
-
 </head>
 
 <body>
 
 <header>
-
-<div class="logo">
-    🖥 Office Monitor
-</div>
-
-<div id="counter" class="counter">
-    Загрузка...
-</div>
-
+    <div class="logo">🖥 Office Monitor</div>
+    <div id="counter" class="counter">Загрузка...</div>
 </header>
 
 <main>
-
-<div id="grid" class="grid"></div>
-
+    <div id="grid" class="grid"></div>
 </main>
 
 <script>
@@ -159,49 +142,62 @@ const token =
         location.search
     ).get("token");
 
-
 const connections = {};
 
 
-async function getClients() {
+function waitForIce(pc) {
 
-    try {
+    return new Promise(resolve => {
 
-        const response = await fetch(
-            "/api/clients?token=" +
-            encodeURIComponent(token)
-        );
-
-        if (!response.ok) {
-            throw new Error(
-                "HTTP " + response.status
-            );
+        if (
+            pc.iceGatheringState ===
+            "complete"
+        ) {
+            resolve();
+            return;
         }
 
-        return await response.json();
+        function check() {
 
-    } catch (error) {
+            if (
+                pc.iceGatheringState ===
+                "complete"
+            ) {
 
-        console.error(error);
+                pc.removeEventListener(
+                    "icegatheringstatechange",
+                    check
+                );
 
-        return {};
+                resolve();
+            }
+        }
 
-    }
+        pc.addEventListener(
+            "icegatheringstatechange",
+            check
+        );
+    });
 }
 
 
-async function createConnection(
+async function connectToPC(
     pcId,
     video
 ) {
 
-    if (connections[pcId]) {
+    const old =
+        connections[pcId];
+
+    if (old) {
 
         try {
-            connections[pcId].pc.close();
-            connections[pcId].ws.close();
+            old.pc.close();
         } catch {}
 
+        try {
+            old.ws.close();
+        } catch {}
     }
 
 
@@ -235,8 +231,8 @@ async function createConnection(
 
 
     connections[pcId] = {
-        pc: pc,
-        ws: ws
+        ws: ws,
+        pc: pc
     };
 
 
@@ -250,15 +246,18 @@ async function createConnection(
 
     pc.ontrack = function(event) {
 
-        if (event.streams.length) {
+        if (
+            event.streams &&
+            event.streams.length > 0
+        ) {
 
             video.srcObject =
                 event.streams[0];
 
-            video.play().catch(() => {});
-
+            video.play().catch(
+                () => {}
+            );
         }
-
     };
 
 
@@ -267,10 +266,8 @@ async function createConnection(
 
             console.log(
                 pcId,
-                "WebRTC:",
                 pc.connectionState
             );
-
         };
 
 
@@ -299,12 +296,10 @@ async function createConnection(
         } catch (error) {
 
             console.error(
-                "Offer error:",
+                "WebRTC offer error:",
                 error
             );
-
         }
-
     };
 
 
@@ -312,19 +307,21 @@ async function createConnection(
 
         try {
 
-            const message =
-                JSON.parse(event.data);
+            const data =
+                JSON.parse(
+                    event.data
+                );
 
 
             if (
-                message.type === "answer"
+                data.type ===
+                "answer"
             ) {
 
                 await pc.setRemoteDescription({
                     type: "answer",
-                    sdp: message.sdp
+                    sdp: data.sdp
                 });
-
             }
 
         } catch (error) {
@@ -333,80 +330,58 @@ async function createConnection(
                 "Signal error:",
                 error
             );
-
         }
-
     };
-
-
-    ws.onclose = function() {
-
-        console.log(
-            "Viewer signaling closed:",
-            pcId
-        );
-
-    };
-
 }
 
 
-function waitForIce(pc) {
+async function loadClients() {
 
-    return new Promise(resolve => {
+    try {
 
-        if (
-            pc.iceGatheringState ===
-            "complete"
-        ) {
+        const response =
+            await fetch(
+                "/api/clients?token=" +
+                encodeURIComponent(token)
+            );
 
-            resolve();
-            return;
 
+        if (!response.ok) {
+
+            throw new Error(
+                "HTTP " +
+                response.status
+            );
         }
 
 
-        function check() {
-
-            if (
-                pc.iceGatheringState ===
-                "complete"
-            ) {
-
-                pc.removeEventListener(
-                    "icegatheringstatechange",
-                    check
-                );
-
-                resolve();
-
-            }
-
-        }
+        const data =
+            await response.json();
 
 
-        pc.addEventListener(
-            "icegatheringstatechange",
-            check
+        render(data);
+
+    } catch (error) {
+
+        console.error(
+            error
         );
-
-    });
-
+    }
 }
 
 
-async function render() {
-
-    const data =
-        await getClients();
-
+function render(data) {
 
     const grid =
-        document.getElementById("grid");
+        document.getElementById(
+            "grid"
+        );
 
 
     const counter =
-        document.getElementById("counter");
+        document.getElementById(
+            "counter"
+        );
 
 
     grid.innerHTML = "";
@@ -419,21 +394,30 @@ async function render() {
     let online = 0;
 
 
-    for (const pcId of ids) {
+    for (
+        const pcId of ids
+    ) {
 
-        const pc = data[pcId];
+        const pc =
+            data[pcId];
 
 
         const card =
-            document.createElement("div");
+            document.createElement(
+                "div"
+            );
 
-        card.className = "card";
+        card.className =
+            "card";
 
 
         const preview =
-            document.createElement("div");
+            document.createElement(
+                "div"
+            );
 
-        preview.className = "preview";
+        preview.className =
+            "preview";
 
 
         if (pc.online) {
@@ -442,17 +426,22 @@ async function render() {
 
 
             const video =
-                document.createElement("video");
+                document.createElement(
+                    "video"
+                );
+
 
             video.autoplay = true;
             video.playsInline = true;
             video.muted = true;
 
 
-            preview.appendChild(video);
+            preview.appendChild(
+                video
+            );
 
 
-            createConnection(
+            connectToPC(
                 pcId,
                 video
             );
@@ -460,51 +449,70 @@ async function render() {
         } else {
 
             const text =
-                document.createElement("div");
+                document.createElement(
+                    "div"
+                );
+
 
             text.className =
                 "waiting";
 
+
             text.textContent =
                 "OFFLINE";
 
-            preview.appendChild(text);
 
+            preview.appendChild(
+                text
+            );
         }
 
 
         const info =
-            document.createElement("div");
+            document.createElement(
+                "div"
+            );
 
-        info.className = "info";
+
+        info.className =
+            "info";
 
 
         const name =
-            document.createElement("div");
+            document.createElement(
+                "div"
+            );
 
-        name.className = "name";
 
-        name.textContent = pcId;
+        name.className =
+            "name";
+
+
+        name.textContent =
+            pcId;
 
 
         const status =
-            document.createElement("div");
+            document.createElement(
+                "div"
+            );
 
 
         if (pc.online) {
 
-            status.className = "online";
+            status.className =
+                "online";
 
             status.textContent =
                 "● ONLINE";
 
         } else {
 
-            status.className = "offline";
+            status.className =
+                "offline";
 
             status.textContent =
                 "● OFFLINE";
-
         }
 
 
@@ -517,7 +525,6 @@ async function render() {
 
 
         grid.appendChild(card);
-
     }
 
 
@@ -526,15 +533,14 @@ async function render() {
         " online / " +
         ids.length +
         " всего";
-
 }
 
 
-render();
+loadClients();
 
 
 setInterval(
-    render,
+    loadClients,
     10000
 );
 
@@ -547,7 +553,7 @@ setInterval(
 
 def authorized(request):
 
-    received =
+    token =
         request.query.get(
             "token",
             ""
@@ -555,8 +561,7 @@ def authorized(request):
 
     return (
         TOKEN != "CHANGE_ME"
-        and
-        received == TOKEN
+        and token == TOKEN
     )
 
 
@@ -568,6 +573,7 @@ async def index(request):
             status=403,
             text="Forbidden"
         )
+
 
     return web.Response(
         text=HTML,
@@ -592,18 +598,16 @@ async def api_clients(request):
 
     for pc_id, data in clients.items():
 
-        online = (
-            now - data["last_seen"]
-            < OFFLINE_AFTER
-        )
-
-
         result[pc_id] = {
-            "online": online
+            "online":
+                now - data["last_seen"]
+                < OFFLINE_AFTER
         }
 
 
-    return web.json_response(result)
+    return web.json_response(
+        result
+    )
 
 
 async def agent_ws(request):
@@ -644,7 +648,8 @@ async def agent_ws(request):
 
 
     clients[pc_id] = {
-        "last_seen": time.time()
+        "last_seen":
+            time.time()
     }
 
 
@@ -658,7 +663,10 @@ async def agent_ws(request):
 
         async for message in ws:
 
-            if message.type != WSMsgType.TEXT:
+            if (
+                message.type !=
+                WSMsgType.TEXT
+            ):
                 continue
 
 
@@ -685,26 +693,29 @@ async def agent_ws(request):
                 )
 
 
-            if viewer_id:
-
-                viewer =
-                    viewers.get(
-                        (
-                            pc_id,
-                            viewer_id
-                        )
-                    )
+            if not viewer_id:
+                continue
 
 
-                if viewer:
+            viewer =
+                viewers.get(
+                    viewer_id
+                )
 
-                    await viewer.send_str(
-                        json.dumps(data)
-                    )
+
+            if viewer:
+
+                await viewer.send_str(
+                    json.dumps(data)
+                )
+
 
     finally:
 
-        if agents.get(pc_id) is ws:
+        if (
+            agents.get(pc_id)
+            is ws
+        ):
 
             agents.pop(
                 pc_id,
@@ -725,9 +736,6 @@ async def agent_ws(request):
 
 
     return ws
-
-
-viewers = {}
 
 
 async def viewer_ws(request):
@@ -768,7 +776,7 @@ async def viewer_ws(request):
 
 
     viewer_id =
-        os.urandom(8).hex()
+        uuid.uuid4().hex
 
 
     ws =
@@ -780,19 +788,17 @@ async def viewer_ws(request):
     await ws.prepare(request)
 
 
-    viewers[
-        (
-            pc_id,
-            viewer_id
-        )
-    ] = ws
+    viewers[viewer_id] = ws
 
 
     try:
 
         async for message in ws:
 
-            if message.type != WSMsgType.TEXT:
+            if (
+                message.type !=
+                WSMsgType.TEXT
+            ):
                 continue
 
 
@@ -816,13 +822,11 @@ async def viewer_ws(request):
                 json.dumps(data)
             )
 
+
     finally:
 
         viewers.pop(
-            (
-                pc_id,
-                viewer_id
-            ),
+            viewer_id,
             None
         )
 
@@ -837,7 +841,8 @@ async def health(request):
     )
 
 
-app = web.Application()
+app =
+    web.Application()
 
 
 app.router.add_get(
